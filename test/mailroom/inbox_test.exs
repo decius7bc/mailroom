@@ -648,8 +648,14 @@ defmodule Mailroom.InboxTest do
       }
 
       # Call handle_info directly - this would have returned nil before the fix
-      # because handle_continue's result wasn't being returned
-      result = TestMailRouter.handle_info({:ssl_closed, :fake_socket}, state)
+      # because handle_continue's result wasn't being returned. The reconnect
+      # attempt logs a warning and a connection error, so keep them out of the
+      # test output.
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(self(), {:result, TestMailRouter.handle_info({:ssl_closed, :fake_socket}, state)})
+      end)
+
+      assert_received {:result, result}
 
       # The result should be a valid GenServer callback tuple
       # Either {:noreply, _}, {:noreply, _, _}, {:stop, _, _}, or {:stop, _, _, _}
