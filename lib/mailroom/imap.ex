@@ -584,8 +584,25 @@ defmodule Mailroom.IMAP do
     {:noreply, %{state | temp: %{temp | quota_roots: temp.quota_roots ++ roots}}}
   end
 
-  # Unsolicited QUOTAROOT responses outside GETQUOTAROOT are ignored
+  defp handle_response(<<"* QUOTA ", rest::binary>>, %{temp: %{quotas: quotas} = temp} = state) do
+    {root, rest} = parse_string(rest)
+
+    resources =
+      rest
+      |> String.trim_leading()
+      |> parse_list_only()
+      |> quota_resources(%{})
+
+    quotas = Map.update(quotas, root, resources, &Map.merge(&1, resources))
+
+    {:noreply, %{state | temp: %{temp | quotas: quotas}}}
+  end
+
+  # Unsolicited QUOTA/QUOTAROOT responses outside GETQUOTAROOT are ignored
   defp handle_response(<<"* QUOTAROOT ", _msg::binary>>, state),
+    do: {:noreply, state}
+
+  defp handle_response(<<"* QUOTA ", _msg::binary>>, state),
     do: {:noreply, state}
 
   defp handle_response(<<"* ", msg::binary>>, state) do
@@ -1039,6 +1056,15 @@ defmodule Mailroom.IMAP do
         parse_quota_roots(rest, [root | acc])
     end
   end
+
+  defp quota_resources([name, usage, limit | tail], acc) do
+    acc =
+      Map.put(acc, String.upcase(name), {String.to_integer(usage), String.to_integer(limit)})
+
+    quota_resources(tail, acc)
+  end
+
+  defp quota_resources(_, acc), do: acc
 
   defp flatten_fetch_results([]), do: []
 

@@ -334,6 +334,59 @@ defmodule Mailroom.IMAPTest do
     client
   end
 
+  test "GETQUOTAROOT with a single root and STORAGE" do
+    client =
+      quota_client("GETQUOTAROOT \"INBOX\"\r\n", [
+        "* QUOTAROOT INBOX \"\"\r\n",
+        "* QUOTA \"\" (STORAGE 10 512)\r\n",
+        "OK Getquotaroot completed\r\n"
+      ])
+
+    assert IMAP.get_quota_root(client, :inbox) ==
+             {:ok, [%{root: "", resources: %{"STORAGE" => {10, 512}}}]}
+  end
+
+  test "GETQUOTAROOT with several resources" do
+    client =
+      quota_client("GETQUOTAROOT \"INBOX\"\r\n", [
+        "* QUOTAROOT \"INBOX\" \"\"\r\n",
+        "* QUOTA \"\" (STORAGE 10 512 message 3 1000)\r\n",
+        "OK Getquotaroot completed\r\n"
+      ])
+
+    assert IMAP.get_quota_root(client, "INBOX") ==
+             {:ok, [%{root: "", resources: %{"STORAGE" => {10, 512}, "MESSAGE" => {3, 1000}}}]}
+  end
+
+  test "GETQUOTAROOT with several roots, one without a QUOTA line" do
+    client =
+      quota_client("GETQUOTAROOT \"Shared Folder\"\r\n", [
+        "* QUOTAROOT \"Shared Folder\" user.peter \"shared root\" orphan\r\n",
+        "* QUOTA \"shared root\" (STORAGE 2048 4096)\r\n",
+        "* QUOTA user.peter (STORAGE 10 512)\r\n",
+        "OK Getquotaroot completed\r\n"
+      ])
+
+    assert IMAP.get_quota_root(client, "Shared Folder") ==
+             {:ok,
+              [
+                %{root: "user.peter", resources: %{"STORAGE" => {10, 512}}},
+                %{root: "shared root", resources: %{"STORAGE" => {2048, 4096}}},
+                %{root: "orphan", resources: %{}}
+              ]}
+  end
+
+  test "GETQUOTAROOT with an empty resource list" do
+    client =
+      quota_client("GETQUOTAROOT \"INBOX\"\r\n", [
+        "* QUOTAROOT INBOX \"\"\r\n",
+        "* QUOTA \"\" ()\r\n",
+        "OK Getquotaroot completed\r\n"
+      ])
+
+    assert IMAP.get_quota_root(client, "INBOX") == {:ok, [%{root: "", resources: %{}}]}
+  end
+
   test "GETQUOTAROOT with an empty root list" do
     client =
       quota_client("GETQUOTAROOT \"Archive\"\r\n", [
@@ -342,6 +395,19 @@ defmodule Mailroom.IMAPTest do
       ])
 
     assert IMAP.get_quota_root(client, "Archive") == {:ok, []}
+  end
+
+  test "GETQUOTAROOT is not UID-prefixed in UID mode" do
+    client =
+      quota_client("GETQUOTAROOT \"INBOX\"\r\n", [
+        "* QUOTAROOT INBOX \"\"\r\n",
+        "* QUOTA \"\" (STORAGE 1 2)\r\n",
+        "OK Getquotaroot completed\r\n"
+      ])
+
+    client |> IMAP.mode(:uid)
+
+    assert {:ok, [%{root: ""}]} = IMAP.get_quota_root(client, "INBOX")
   end
 
   test "GETQUOTAROOT returns an error when the server answers NO" do
