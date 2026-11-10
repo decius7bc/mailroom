@@ -139,6 +139,32 @@ defmodule Mailroom.IMAP do
   def status(pid, mailbox_name, items),
     do: GenServer.call(pid, {:status, mailbox_name, items})
 
+  @typedoc "A quota root with its resources, each mapped to `{usage, limit}`"
+  @type quota_root :: %{
+          root: String.t(),
+          resources: %{optional(String.t()) => {non_neg_integer(), non_neg_integer()}}
+        }
+
+  @doc ~S"""
+  Gets the quota roots of a mailbox and their quotas (RFC 2087 / RFC 9208 `GETQUOTAROOT`)
+
+  Returns one entry per quota root, in the order the server lists them.
+  Resource names are uppercased. `STORAGE` values are in KiB, as the server
+  sends them. A root the server sends no `QUOTA` line for has `resources: %{}`.
+
+  Returns `{:error, reason}` if the server rejects the command with `NO`, for
+  example because it lacks the `QUOTA` capability.
+
+  ## Examples:
+
+      > IMAP.get_quota_root(client, "INBOX")
+      {:ok, [%{root: "", resources: %{"STORAGE" => {10, 512}}}]}
+  """
+  @spec get_quota_root(GenServer.server(), String.t() | :inbox) ::
+          {:ok, [quota_root()]} | {:error, String.t()}
+  def get_quota_root(pid, mailbox_name),
+    do: GenServer.call(pid, {:get_quota_root, mailbox_name})
+
   @doc ~S"""
   Fetches the items for the specified message or range of messages
 
@@ -333,6 +359,17 @@ defmodule Mailroom.IMAP do
      )}
   end
 
+  def handle_call({:get_quota_root, :inbox}, from, state),
+    do: handle_call({:get_quota_root, "INBOX"}, from, state)
+
+  def handle_call({:get_quota_root, mailbox_name}, from, state) do
+    {:noreply,
+     send_command(from, ["GETQUOTAROOT", " ", quote_string(mailbox_name)], %{
+       state
+       | temp: %{quota_roots: [], quotas: %{}}
+     })}
+  end
+
   def handle_call({:fetch, sequence, items}, from, state) do
     {:noreply,
      send_command(from, ["FETCH", " ", to_sequence(sequence), " ", items_to_list(items)], %{
@@ -462,6 +499,7 @@ defmodule Mailroom.IMAP do
     rescue
       _ -> :ok
     end
+
     :ok
   end
 
@@ -534,6 +572,20 @@ defmodule Mailroom.IMAP do
     do: {:noreply, state}
 
   defp handle_response(<<"* BYE ", _msg::binary>>, state),
+    do: {:noreply, state}
+
+  defp handle_response(
+         <<"* QUOTAROOT ", rest::binary>>,
+         %{temp: %{quota_roots: _} = temp} = state
+       ) do
+    {_mailbox, rest} = parse_string(rest)
+    roots = parse_quota_roots(rest, [])
+
+    {:noreply, %{state | temp: %{temp | quota_roots: temp.quota_roots ++ roots}}}
+  end
+
+  # Unsolicited QUOTAROOT responses outside GETQUOTAROOT are ignored
+  defp handle_response(<<"* QUOTAROOT ", _msg::binary>>, state),
     do: {:noreply, state}
 
   defp handle_response(<<"* ", msg::binary>>, state) do
@@ -824,6 +876,18 @@ defmodule Mailroom.IMAP do
        ),
        do: send_reply(caller, temp || msg, remove_command_from_state(state, cmd_tag))
 
+  defp process_command_response(
+         cmd_tag,
+         %{command: "GETQUOTAROOT", caller: caller},
+         _msg,
+         %{temp: %{quota_roots: roots, quotas: quotas}} = state
+       ) do
+    result =
+      Enum.map(roots, fn root -> %{root: root, resources: Map.get(quotas, root, %{})} end)
+
+    send_reply(caller, result, %{remove_command_from_state(state, cmd_tag) | temp: nil})
+  end
+
   defp process_command_response(cmd_tag, %{command: "COPY", caller: caller}, msg, state),
     do: send_reply(caller, msg, remove_command_from_state(state, cmd_tag))
 
@@ -959,6 +1023,21 @@ defmodule Mailroom.IMAP do
     defp trim(string), do: String.trim(string)
   else
     defp trim(string), do: String.strip(string)
+  end
+
+  defp parse_quota_roots(rest, acc) do
+    case String.trim_leading(rest, " ") do
+      "" ->
+        Enum.reverse(acc)
+
+      <<"\r\n", _::binary>> ->
+        Enum.reverse(acc)
+
+      rest ->
+        {root, rest} = parse_string(rest)
+
+        parse_quota_roots(rest, [root | acc])
+    end
   end
 
   defp flatten_fetch_results([]), do: []
