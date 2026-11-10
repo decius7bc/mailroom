@@ -310,6 +310,49 @@ defmodule Mailroom.IMAPTest do
     assert statuses == %{messages: 4, recent: 2, unseen: 3}
   end
 
+  defp quota_client(command, replies) do
+    server = TestServer.start(ssl: true)
+
+    TestServer.expect(server, fn expectations ->
+      expectations
+      |> TestServer.tagged(:connect, "* OK IMAP ready\r\n")
+      |> TestServer.tagged("LOGIN \"test@example.com\" \"P@55w0rD\"\r\n", [
+        "* CAPABILITY (IMAPrev4 QUOTA)\r\n",
+        "OK test@example.com authenticated (Success)\r\n"
+      ])
+      |> TestServer.tagged(command, replies)
+    end)
+
+    {:ok, client} =
+      IMAP.connect(server.address, "test@example.com", "P@55w0rD",
+        port: server.port,
+        ssl: true,
+        ssl_opts: [verify: :verify_none],
+        debug: @debug
+      )
+
+    client
+  end
+
+  test "GETQUOTAROOT with an empty root list" do
+    client =
+      quota_client("GETQUOTAROOT \"Archive\"\r\n", [
+        "* QUOTAROOT Archive\r\n",
+        "OK Getquotaroot completed\r\n"
+      ])
+
+    assert IMAP.get_quota_root(client, "Archive") == {:ok, []}
+  end
+
+  test "GETQUOTAROOT returns an error when the server answers NO" do
+    client =
+      quota_client("GETQUOTAROOT \"INBOX\"\r\n", [
+        "NO Unknown command GETQUOTAROOT\r\n"
+      ])
+
+    assert IMAP.get_quota_root(client, "INBOX") == {:error, "Unknown command GETQUOTAROOT"}
+  end
+
   test "FETCH single message" do
     server = TestServer.start(ssl: true)
 
